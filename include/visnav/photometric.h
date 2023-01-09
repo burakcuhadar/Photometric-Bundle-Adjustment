@@ -40,7 +40,11 @@ struct PhotometricCostFunctor {
 
         // project p into the target frame(cam2)
         Eigen::Matrix<T, 3, 1> p_unproj = cam1->unproject(p).stableNormalized();
-        Eigen::Matrix<T, 2, 1> p_target = cam2->project(T_w_c2.inverse() * T_w_c1 * (p_unproj / inv_depth[0]));
+        Sophus::SE3<T> T_c2_c1 = T_w_c2.inverse() * T_w_c1;
+
+        //Eigen::Matrix<T, 2, 1> p_target = cam2->project(T_w_c2.inverse() * T_w_c1 * (p_unproj / inv_depth[0]));
+        // more stable:
+        Eigen::Matrix<T, 2, 1> p_target = cam2->project(T_c2_c1.so3() * p_unproj + inv_depth[0] * T_c2_c1.translation());
 
         return p_target;
     }
