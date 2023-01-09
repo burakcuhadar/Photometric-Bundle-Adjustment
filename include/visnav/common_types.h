@@ -173,6 +173,10 @@ struct Camera {
   /// camera pose (transforms from camera to world)
   Sophus::SE3d T_w_c;
 
+  /// brightness transfer function parameters
+  double a = 0.0;
+  double b = 0.0;
+
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 

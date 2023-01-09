@@ -50,11 +50,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <CLI/CLI.hpp>
 
 #include <visnav/common_types.h>
+#include <visnav/pba_types.h>
 
 #include <visnav/calibration.h>
 
 #include <visnav/keypoints.h>
 #include <visnav/map_utils.h>
+#include <visnav/pba_map_utils.h>
 #include <visnav/matching_utils.h>
 
 #include <visnav/gui_helper.h>
@@ -98,6 +100,10 @@ void optimize();
 void compute_projections();
 bool is_landmark_outlier(TrackId track_id);
 void remove_outlier_landmarks();
+
+void initialize_pba();
+void optimize_pba();
+void compute_pba_projections();
 
 ///////////////////////////////////////////////////////////////////////////////
 /// Constants
@@ -160,6 +166,13 @@ std::shared_ptr<BowVocabulary> bow_voc;
 
 /// Database for BoW lookup.
 std::shared_ptr<BowDatabase> bow_db;
+
+/// Landmarks with inverse depth reparametrization in current map
+PbaLandmarks pba_landmarks;
+PbaImageProjections pba_image_projections;
+PbaTrackProjections pba_track_projections;
+std::map<FrameCamId, std::vector<double>> pba_imgs;
+std::map<FrameCamId, std::shared_ptr<ceres::Grid2D<double, 1>>> grids;
 
 ///////////////////////////////////////////////////////////////////////////////
 /// GUI parameters
@@ -239,6 +252,9 @@ pangolin::Var<double> reprojection_error_pnp_inlier_threshold_pixel(
 
 pangolin::Var<bool> ba_optimize_intrinsics("hidden.ba_opt_intrinsics", false,
                                            true);
+pangolin::Var<bool> pba_optimize_btf_params("hidden.pba_opt_btf_params", true,
+                                           true);
+
 pangolin::Var<int> ba_verbose("hidden.ba_verbose", 1, 0, 2);
 
 pangolin::Var<double> reprojection_error_huber_pixel("hidden.ba_huber_width",
@@ -297,6 +313,10 @@ Button add_camera_btn("ui.add_camera", &add_next_camera);
 Button add_landmarks_btn("ui.add_landmarks", &add_new_landmarks);
 
 Button optimize_btn("ui.optimize", &optimize);
+
+Button initialize_pba_btn("ui.initialize_pba", &initialize_pba);
+
+Button optimize_pba_btn("ui.optimize_pba", &optimize_pba);
 
 Button remove_outlier_btn("ui.remove_outliers", &remove_outlier_landmarks);
 
@@ -744,6 +764,7 @@ void draw_image_overlay(pangolin::View& v, size_t view_id) {
       text_row += 20;
     }
   }
+  //TODO visualize pba landmark reprojections!
 
   if (show_epipolar) {
     glLineWidth(1.0);
@@ -880,6 +901,39 @@ void draw_scene() {
       pangolin::glVertex(kv_lm.second.p);
     }
     glEnd();
+  }
+
+  // render pba landmarks
+  if(show_points3d && pba_landmarks.size() > 0) {
+      glPointSize(3.0);
+      glBegin(GL_POINTS);
+      for (const auto& kv_lm : pba_landmarks) {
+        //const TrackId track_id = kv_lm.first;
+
+        const bool in_cam_1 = kv_lm.second.obs.count(fcid1) > 0;
+        const bool in_cam_2 = kv_lm.second.obs.count(fcid2) > 0;
+
+        //const bool outlier_in_cam_1 = kv_lm.second.outlier_obs.count(fcid1) > 0;
+        //const bool outlier_in_cam_2 = kv_lm.second.outlier_obs.count(fcid2) > 0;
+
+        //TODO implement is_pba_landmark_outlier!
+        /*if (is_pba_landmark_outlier(track_id)) {
+          glColor3ubv(color_outlier_points);
+        }*/
+
+        if (in_cam_1 && in_cam_2) {
+          glColor3ubv(color_selected_both);
+        } else if (in_cam_1) {
+          glColor3ubv(color_selected_left);
+        } else if (in_cam_2) {
+          glColor3ubv(color_selected_right);
+        } else {
+          glColor3ubv(color_points);
+        }
+
+        pangolin::glVertex(kv_lm.second.get_p(cameras, calib_cam));
+      }
+      glEnd();
   }
 }
 
@@ -1065,6 +1119,10 @@ void clear_map() {
   camera_candidates = CameraCandidates();
   image_projections.clear();
   track_projections.clear();
+  // clear pba data structures as well
+  pba_landmarks.clear();
+  pba_image_projections.clear();
+  pba_track_projections.clear();
 }
 
 // reconstruction stage to string for output
@@ -2129,3 +2187,184 @@ void remove_outlier_landmarks() {
 
   print_proceed_to(camera_candidates.current_stage);
 }
+
+
+
+
+
+void initialize_pba() {
+    // Reparametrize landmarks for inverse depth
+    for(const auto& lm_kv : landmarks) {
+        PbaLandmark pba_lm(lm_kv.second, cameras, calib_cam, images.at(lm_kv.second.obs.begin()->first));
+        if(pba_lm.inv_depth < 1e-5) {
+            continue;//TODO required?
+        }
+        pba_landmarks.insert({lm_kv.first, pba_lm});
+    }
+
+    for(const auto& img_kv : images) {
+        const auto& fcid = img_kv.first;
+        const auto& img = img_kv.second;
+
+        const auto& h = img.h;
+        const auto& w = img.w;
+
+        pba_imgs[fcid] = std::vector<double>();
+
+        for(size_t j=0; j<h; j++) {
+            for(size_t i=0; i<w; i++) {
+                double val = (double) img(i, j) / 255.;
+                pba_imgs[fcid].push_back(val);
+            }
+        }
+
+        //ceres::Grid2D<double, 1> grid(pba_imgs.at(fcid).data(), 0, h, 0, w);
+        grids[fcid] = std::make_shared<ceres::Grid2D<double, 1>>(pba_imgs.at(fcid).data(), 0, h, 0, w);
+    }
+
+    //test grids //TODO delete below
+    const auto& h = images[{0,0}].h;
+    const auto& w = images[{0,0}].w;
+    for(const auto& grid_kv : grids) {
+        const auto& img = images.at(grid_kv.first);
+        ceres::BiCubicInterpolator<ceres::Grid2D<double,1>> interp(*(grid_kv.second));
+        for(size_t j=0; j<h; j++) {
+            for(size_t i=0; i<w; i++) {
+                double intensity;
+                interp.Evaluate(j,i,&intensity);
+                if(intensity != double(img(i,j)) / 255.) {
+                    std::cout << "correct: " << double(img(i,j)) << std::endl;
+                    std::cout << "wrong: " << intensity << std::endl;
+                }
+            }
+        }
+
+    }
+
+    // We don't need these data structures anymore
+    landmarks.clear();
+    image_projections.clear();
+    track_projections.clear();
+}
+
+void debug_poses_print() {
+    for(const auto& cam_kv : cameras) {
+        std::cout << cam_kv.first << " " << cam_kv.second.T_w_c.params() << std::endl;
+    }
+}
+
+void print_poses(const std::string& file_name) {
+    //TODO print poses
+    std::ofstream pose_file;
+    pose_file.open(file_name, std::ios::trunc);
+    size_t timestamp = 0;
+    for(const auto& cam_kv : cameras) {
+        //pose_file << cam_kv.first << " ";
+        //pose_file << cam_kv.first.frame_id*10 + cam_kv.first.cam_id << " ";
+        pose_file << timestamp << " ";
+        auto quat = cam_kv.second.T_w_c.unit_quaternion();
+        auto trans = cam_kv.second.T_w_c.translation();
+        pose_file << trans.x() << " " << trans.y() << " " << trans.z() << " ";
+        pose_file << quat.x() << " " << quat.y() << " " << quat.z() << " " << quat.w();
+        pose_file << std::endl;
+        timestamp++;
+    }
+    pose_file.close();
+
+
+    //TODO delete below
+    std::ofstream cam_file;
+    cam_file.open("cam.txt", std::ios::trunc);
+    for(const auto& cam_kv : cameras) {
+        cam_file << cam_kv.second.a << " " << cam_kv.second.b << std::endl;
+    }
+
+    std::ofstream depth_file;
+    depth_file.open("depths.txt", std::ios::trunc);
+    for(const auto& lm_kv : pba_landmarks) {
+        depth_file << std::to_string(1.0 / lm_kv.second.inv_depth) << std::endl;
+    }
+}
+
+
+void optimize_pba() {
+    // info on how many cameras were added (special case: first optimization after
+    // initialization)
+    size_t num_obs = 0;
+    for (const auto& kv : pba_landmarks) {
+      num_obs += kv.second.obs.size();
+    }
+    std::cerr << "Optimizing map with " << cameras.size() << " cameras, "
+              << pba_landmarks.size() << " points and " << num_obs
+              << " observations." << std::endl;
+
+    // Fix first two cameras to fix SE3 and scale gauge. Making the whole second
+    // camera constant is a bit suboptimal, since we only need 1 DoF, but it's
+    // simple and the initial poses should be good from calibration.
+    std::set<FrameCamId> fixed_cameras = {{0, 0}, {0, 1}};
+
+    // Run bundle adjustment
+    PhotometricBundleAdjustmentOptions pba_options;
+    pba_options.optimize_intrinsics = ba_optimize_intrinsics;
+    pba_options.optimize_btf_params = pba_optimize_btf_params;
+    pba_options.huber_parameter = reprojection_error_huber_pixel;
+    pba_options.max_num_iterations = 1000; //TODO back to 100
+    pba_options.verbosity_level = ba_verbose;
+
+    print_poses("poses_before.txt");
+
+    photometric_bundle_adjustment(pba_landmarks, fixed_cameras, calib_cam, cameras, images, grids, pba_options);
+
+    print_poses("poses_after.txt");
+
+    // Update project info cache
+    compute_pba_projections();
+}
+
+void compute_pba_projections() {   
+    pba_image_projections.clear();
+    pba_track_projections.clear();
+
+    for (const auto& kv_lm : pba_landmarks) {
+        const TrackId track_id = kv_lm.first;
+        const auto& lm = kv_lm.second;
+
+        for (const auto& kv_obs : kv_lm.second.obs) {
+            const FrameCamId& fcid = kv_obs.first;
+
+            PbaProjectedLandmarkPtr proj_lm(new PbaProjectedLandmark);
+            proj_lm->track_id = track_id;
+            lm.compute_projection(fcid, cameras, calib_cam, images.at(lm.ref_frame),
+                                  images.at(fcid), proj_lm);
+            //TODO set_pba_outlier_flags(*proj_lm);
+            pba_image_projections[fcid].obs.push_back(proj_lm);
+            pba_track_projections[track_id][fcid] = proj_lm;
+        }
+    }
+    std::cout << "computed pba projections" << std::endl;
+    /*
+      const Eigen::Vector2d p_2d_corner =
+          feature_corners.at(fcid).corners[kv_obs.second];
+
+      const Eigen::Vector3d p_c =
+          cameras.at(fcid).T_w_c.inverse() * kv_lm.second.p;
+      const Eigen::Vector2d p_2d_repoj =
+          calib_cam.intrinsics.at(fcid.cam_id)->project(p_c);
+
+      ProjectedLandmarkPtr proj_lm(new ProjectedLandmark);
+      proj_lm->track_id = track_id;
+      proj_lm->point_measured = p_2d_corner;
+      proj_lm->point_reprojected = p_2d_repoj;
+      proj_lm->point_3d_c = p_c;
+      proj_lm->reprojection_error = (p_2d_corner - p_2d_repoj).norm();
+
+      set_outlier_flags(*proj_lm);
+
+      image_projections[fcid].obs.push_back(proj_lm);
+      track_projections[track_id][fcid] = proj_lm;
+     */
+}
+
+
+
+

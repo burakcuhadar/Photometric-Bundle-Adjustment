@@ -105,6 +105,9 @@ if(OpenCV_VERSION VERSION_LESS 3)
 endif()
 
 
+add_executable(test_ceres src/test_ceres.cpp)
+target_link_libraries(test_ceres pangolin Ceres::ceres)
+
 
 add_executable(test_ceres_se3 src/test_ceres_se3.cpp)
 target_link_libraries(test_ceres_se3 Ceres::ceres)
