@@ -50,12 +50,19 @@ struct PbaLandmark {
 
     /// Inlier observations in the current map.
     /// This is a subset of the original feature track.
-    FeatureTrack obs; //TODO another type from FeatureTrack? no need for feature id? when T_w_cs are updated,
+    std::vector<FrameCamId> obs; //TODO std::unordered_map is more efficient see sfm.cpp render pba landmarks incam1/2
+    //FeatureTrack obs; //TODO another type from FeatureTrack? no need for feature id? when T_w_cs are updated,
                       // we may not observe the landmark in the same frames! how to handle that?
 
     /// Outlier observations in the current map.
     /// This is a subset of the original feature track.
-    FeatureTrack outlier_obs; //TODO no need?
+    //FeatureTrack outlier_obs; //TODO no need?
+
+    PbaLandmark() {}
+
+    PbaLandmark(FrameCamId ref_frame, Eigen::Vector2d p_2d, double inv_depth, double intensity,
+                std::vector<FrameCamId> obs) : ref_frame(ref_frame), p_2d(p_2d), inv_depth(inv_depth),
+                                               intensity(intensity), obs(obs) {}
 
     /// Construct from landmark
     PbaLandmark(const Landmark& lm,
@@ -79,8 +86,10 @@ struct PbaLandmark {
         interp.Evaluate(p_2d(1), p_2d(0), &(this->intensity));
 
         // Copy observations
-        this->obs = lm.obs;
-        this->outlier_obs = lm.outlier_obs;
+        for(const auto& obs_kv : lm.obs) {
+            this->obs.push_back(obs_kv.first);
+        }
+        //this->outlier_obs = lm.outlier_obs;
     }
 
     //const auto& cam = calib_cam.intrinsics[ref_frame.cam_id];
@@ -104,7 +113,8 @@ struct PbaLandmark {
         const auto point_3d_c = T_w_target.inverse() * T_w_ref * (unproj_p_2d / inv_depth);
         const auto point_reprojected = target_intrinsics->project(point_3d_c);
 
-        //TODO compute photometric error!
+        // Compute photometric error
+        lm_proj->photometric_error = intensity - target_img((size_t) point_reprojected.x(), (size_t) point_reprojected.y());
 
         lm_proj->point_3d_c = point_3d_c;
         lm_proj->point_reprojected = point_reprojected;
@@ -123,14 +133,15 @@ struct PbaLandmark {
 };
 
 
-using PbaLandmarks = std::unordered_map<TrackId, PbaLandmark>;
+using PbaLandmarks = std::map<TrackId, PbaLandmark>; //ordered because we want to find the largest track id
 
 
 /// all landmark projections for inlier and outlier observations for a single
 /// image
+//TODO used?
 struct PbaImageProjection {
   std::vector<PbaProjectedLandmarkConstPtr> obs;
-  std::vector<PbaProjectedLandmarkConstPtr> outlier_obs; //TODO needed?
+  //std::vector<PbaProjectedLandmarkConstPtr> outlier_obs; //TODO needed?
 };
 
 /// projections for all images
@@ -141,6 +152,10 @@ using PbaTrackProjections =
     std::unordered_map<TrackId,
                        std::map<FrameCamId, PbaProjectedLandmarkConstPtr>>;
 
-
+struct CandidatePoint {
+    size_t x;
+    size_t y;
+    FrameCamId fcid;
+};
 
 }

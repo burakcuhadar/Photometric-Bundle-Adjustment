@@ -106,7 +106,7 @@ endif()
 
 
 add_executable(test_ceres src/test_ceres.cpp)
-target_link_libraries(test_ceres pangolin Ceres::ceres)
+target_link_libraries(test_ceres pangolin Ceres::ceres OpenCV)
 
 
 add_executable(test_ceres_se3 src/test_ceres_se3.cpp)

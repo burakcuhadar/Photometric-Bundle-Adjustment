@@ -104,6 +104,9 @@ void remove_outlier_landmarks();
 void initialize_pba();
 void optimize_pba();
 void compute_pba_projections();
+void sample_dso_points();
+bool is_pba_landmark_outlier(const TrackId track_id);
+void remove_outlier_pba_landmarks();
 
 ///////////////////////////////////////////////////////////////////////////////
 /// Constants
@@ -276,6 +279,12 @@ pangolin::Var<double> camera_center_distance_outlier_threshold_meter(
 pangolin::Var<double> z_coordinate_outlier_threshold_meter("hidden.outlier_z",
                                                            0.05, -1.0, 1.0);
 
+pangolin::Var<double> photometric_error_outlier_threshold_normal(
+    "hidden.outlier_photometric", 25.0, 1, 255);
+pangolin::Var<double> photometric_error_outlier_threshold_huge(
+    "hidden.outlier_photometric_huge", 50.0, 1, 255);
+
+
 ///////////////////////////////////////////////////////////////////////////////
 /// GUI buttons
 ///////////////////////////////////////////////////////////////////////////////
@@ -316,9 +325,13 @@ Button optimize_btn("ui.optimize", &optimize);
 
 Button initialize_pba_btn("ui.initialize_pba", &initialize_pba);
 
+Button sample_dso_points_btn("ui.sample_dso_points", &sample_dso_points);
+
 Button optimize_pba_btn("ui.optimize_pba", &optimize_pba);
 
 Button remove_outlier_btn("ui.remove_outliers", &remove_outlier_landmarks);
+
+Button remove_pba_outlier_btn("ui.remove_pba_outliers", &remove_outlier_pba_landmarks);
 
 Button save_map_btn("ui.save_map", &save_map);
 
@@ -763,8 +776,44 @@ void draw_image_overlay(pangolin::View& v, size_t view_id) {
           .Draw(5, text_row);
       text_row += 20;
     }
+
+    if(pba_image_projections.count(fcid) > 0) {
+        glLineWidth(1.0);
+        glColor3f(1.0, 0.0, 0.0);  // red
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        const size_t num_points = pba_image_projections.at(fcid).obs.size();
+
+        // double error_sum = 0;
+        size_t num_outliers = 0;
+
+        // count up and draw all inlier projections
+        for (const auto& lm_proj : pba_image_projections.at(fcid).obs) {
+          // error_sum += lm_proj->reprojection_error;
+
+          if (lm_proj->outlier_flags != PbaOutlierNone) {
+            // outlier point
+            glColor3f(1.0, 0.0, 0.0);  // red
+            ++num_outliers;
+          }
+          else {
+            // clear inlier point
+            glColor3f(1.0, 1.0, 0.0);  // yellow
+          }
+          pangolin::glDrawCirclePerimeter(lm_proj->point_reprojected, 3.0);
+        }
+
+        /*
+          glColor3f(1.0, 0.0, 0.0);  // red
+          pangolin::GlFont::I()
+              .Text("Average repr. error (%u points, %u new outliers): %.2f", //TODO for pba?
+                    num_points, num_outliers, error_sum / num_points)
+              .Draw(5, text_row);
+          text_row += 20;
+         */
+    }
   }
-  //TODO visualize pba landmark reprojections!
 
   if (show_epipolar) {
     glLineWidth(1.0);
@@ -908,20 +957,23 @@ void draw_scene() {
       glPointSize(3.0);
       glBegin(GL_POINTS);
       for (const auto& kv_lm : pba_landmarks) {
-        //const TrackId track_id = kv_lm.first;
+        const TrackId track_id = kv_lm.first;
 
-        const bool in_cam_1 = kv_lm.second.obs.count(fcid1) > 0;
-        const bool in_cam_2 = kv_lm.second.obs.count(fcid2) > 0;
+        const auto& obs = kv_lm.second.obs;
+        const bool in_cam_1 = std::find(obs.begin(), obs.end(), fcid1) != obs.end(); //TODO improve after obs is map
+        const bool in_cam_2 = std::find(obs.begin(), obs.end(), fcid2) != obs.end();
 
         //const bool outlier_in_cam_1 = kv_lm.second.outlier_obs.count(fcid1) > 0;
         //const bool outlier_in_cam_2 = kv_lm.second.outlier_obs.count(fcid2) > 0;
 
-        //TODO implement is_pba_landmark_outlier!
-        /*if (is_pba_landmark_outlier(track_id)) {
-          glColor3ubv(color_outlier_points);
-        }*/
+        //TODO debug, remove
+        if(pba_track_projections.find(track_id) == pba_track_projections.end()) {
+            std::cout << "pba track projs doesnt have key" << std::endl;
+        }
 
-        if (in_cam_1 && in_cam_2) {
+        if (is_pba_landmark_outlier(track_id)) {
+          glColor3ubv(color_outlier_points);
+        } else if (in_cam_1 && in_cam_2) {
           glColor3ubv(color_selected_both);
         } else if (in_cam_1) {
           glColor3ubv(color_selected_left);
@@ -2199,9 +2251,10 @@ void initialize_pba() {
         if(pba_lm.inv_depth < 1e-5) {
             continue;//TODO required?
         }
-        pba_landmarks.insert({lm_kv.first, pba_lm});
+        //pba_landmarks.insert({lm_kv.first, pba_lm});
+        pba_landmarks[lm_kv.first] = pba_lm;
     }
-
+    std::cout << "finished creating pba landmarks" << std::endl;
     for(const auto& img_kv : images) {
         const auto& fcid = img_kv.first;
         const auto& img = img_kv.second;
@@ -2213,7 +2266,7 @@ void initialize_pba() {
 
         for(size_t j=0; j<h; j++) {
             for(size_t i=0; i<w; i++) {
-                double val = (double) img(i, j) / 255.;
+                double val = (double) img(i, j);
                 pba_imgs[fcid].push_back(val);
             }
         }
@@ -2232,7 +2285,7 @@ void initialize_pba() {
             for(size_t i=0; i<w; i++) {
                 double intensity;
                 interp.Evaluate(j,i,&intensity);
-                if(intensity != double(img(i,j)) / 255.) {
+                if(intensity != double(img(i,j))) {
                     std::cout << "correct: " << double(img(i,j)) << std::endl;
                     std::cout << "wrong: " << intensity << std::endl;
                 }
@@ -2240,11 +2293,17 @@ void initialize_pba() {
         }
 
     }
-
+    std::cout << "finished testing grids" << std::endl;
     // We don't need these data structures anymore
     landmarks.clear();
     image_projections.clear();
     track_projections.clear();
+    feature_tracks.clear();//TODO for pba?
+    outlier_tracks.clear();//TODO for pba?
+    feature_matches.clear();
+    feature_corners.clear();
+
+    compute_pba_projections();
 }
 
 void debug_poses_print() {
@@ -2276,7 +2335,7 @@ void print_poses(const std::string& file_name) {
     std::ofstream cam_file;
     cam_file.open("cam.txt", std::ios::trunc);
     for(const auto& cam_kv : cameras) {
-        cam_file << cam_kv.second.a << " " << cam_kv.second.b << std::endl;
+        cam_file << cam_kv.second.ab[0] << " " << cam_kv.second.ab[1] << std::endl;
     }
 
     std::ofstream depth_file;
@@ -2308,7 +2367,7 @@ void optimize_pba() {
     pba_options.optimize_intrinsics = ba_optimize_intrinsics;
     pba_options.optimize_btf_params = pba_optimize_btf_params;
     pba_options.huber_parameter = reprojection_error_huber_pixel;
-    pba_options.max_num_iterations = 1000; //TODO back to 100
+    pba_options.max_num_iterations = 20; //TODO back to 100
     pba_options.verbosity_level = ba_verbose;
 
     print_poses("poses_before.txt");
@@ -2321,6 +2380,34 @@ void optimize_pba() {
     compute_pba_projections();
 }
 
+// for pba: helper for computing outlier flags for a projected landmark
+void set_pba_outlier_flags(PbaProjectedLandmark& lm_proj) {
+  // 1. check for huge photometric error
+  if (lm_proj.photometric_error >
+      photometric_error_outlier_threshold_huge) {
+    lm_proj.outlier_flags |= PbaOutlierPhotometricErrorHuge;
+  }
+
+  // 2. check for large photometric error
+  if (lm_proj.photometric_error >
+      photometric_error_outlier_threshold_normal) {
+    lm_proj.outlier_flags |= PbaOutlierPhotometricErrorNormal;
+  }
+
+  // 3. check for landmarks that are too close to a camera center --> may
+  // correspond to outlier matches or points stuck in local minima
+  const double distance_to_camera = lm_proj.point_3d_c.norm();
+  if (distance_to_camera < camera_center_distance_outlier_threshold_meter) {
+    lm_proj.outlier_flags |= PbaOutlierCameraDistance;
+  }
+
+  // 4. check for landmarks with too small z coordinate for some camera -->
+  // may correspond to outlier matches or points stuck in local minima
+  if (lm_proj.point_3d_c.z() < z_coordinate_outlier_threshold_meter) {
+    lm_proj.outlier_flags |= PbaOutlierZCoordinate;
+  }
+}
+
 void compute_pba_projections() {   
     pba_image_projections.clear();
     pba_track_projections.clear();
@@ -2329,18 +2416,22 @@ void compute_pba_projections() {
         const TrackId track_id = kv_lm.first;
         const auto& lm = kv_lm.second;
 
-        for (const auto& kv_obs : kv_lm.second.obs) {
-            const FrameCamId& fcid = kv_obs.first;
+        //TODO update lm obs, erase obs that are not in image bounds anymore!
+
+        for (const auto& fcid : kv_lm.second.obs) {
+            //const FrameCamId& fcid = kv_obs.first;
 
             PbaProjectedLandmarkPtr proj_lm(new PbaProjectedLandmark);
             proj_lm->track_id = track_id;
             lm.compute_projection(fcid, cameras, calib_cam, images.at(lm.ref_frame),
                                   images.at(fcid), proj_lm);
-            //TODO set_pba_outlier_flags(*proj_lm);
+            set_pba_outlier_flags(*proj_lm);
             pba_image_projections[fcid].obs.push_back(proj_lm);
             pba_track_projections[track_id][fcid] = proj_lm;
         }
     }
+    std::cout << "pba projs size " << std::to_string(pba_track_projections.size()) << std::endl;
+    std::cout << "pba lms size " << std::to_string(pba_landmarks.size()) << std::endl;
     std::cout << "computed pba projections" << std::endl;
     /*
       const Eigen::Vector2d p_2d_corner =
@@ -2366,5 +2457,122 @@ void compute_pba_projections() {
 }
 
 
+// Check if a given pba landmark is an outlier.
+// Assumes that the track_id is currently a landmark.
+bool is_pba_landmark_outlier(const TrackId track_id) {
+  // check if any of the observations has outlier flags
+  for (const auto& kv : pba_track_projections.at(track_id)) {
+    if (kv.second->outlier_flags != PbaOutlierNone) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+void remove_outlier_pba_landmarks() {
+
+  int num_photometric_error_normal = 0;
+  int num_photometric_error_huge = 0;
+  int num_camera_center_distance = 0;
+  int num_z_coordinate = 0;
+
+  // check if there are any outliers apart from the normal photometric error
+  bool any_severe_outliers = false;
+  for (const auto& kv_tracks : pba_track_projections) {
+    for (const auto& kv_proj : kv_tracks.second) {
+      if (kv_proj.second->outlier_flags & ~PbaOutlierPhotometricErrorNormal) {
+        any_severe_outliers = true;
+        break;
+      }
+    }
+    if (any_severe_outliers) {
+      break;
+    }
+  }
+
+  // Go through projections and remove marked outliers.
+  // OutlierPhotometricErrorNormal is only removed if no other types of
+  // outliers are present.
+  for (const auto& kv_tracks : pba_track_projections) {
+    bool remove = false;
+    bool photometric_error_normal_counted = false;
+
+    for (const auto& kv_proj : kv_tracks.second) {
+      // 1. much too large photometric error
+      if (kv_proj.second->outlier_flags & PbaOutlierPhotometricErrorHuge) {
+        ++num_photometric_error_huge;
+        remove = true;
+        break;
+      }
+
+      // 2. too large photometric error (only if no other types)
+      if (kv_proj.second->outlier_flags & PbaOutlierPhotometricErrorNormal) {
+        if (!photometric_error_normal_counted) {
+          ++num_photometric_error_normal;
+          photometric_error_normal_counted = true;
+        }
+        if (!any_severe_outliers) {
+          remove = true;
+          break;
+        }
+      }
+
+      // 3. too small distance to camera
+      if (kv_proj.second->outlier_flags & PbaOutlierCameraDistance) {
+        remove = true;
+        ++num_camera_center_distance;
+        break;
+      }
+
+      // 4. too small z coordinate
+      if (kv_proj.second->outlier_flags & PbaOutlierZCoordinate) {
+        remove = true;
+        ++num_z_coordinate;
+        break;
+      }
+    }
+
+    if (remove) {
+      // outlier observation --> remove pba landmark and flag feature track
+      //const auto iter = feature_tracks.find(kv_tracks.first); //TODO we dont have feature track for pba
+      //outlier_tracks.insert(*iter);
+      //feature_tracks.erase(iter);
+      pba_landmarks.erase(kv_tracks.first);
+    }
+  }
+
+  // update projections
+  compute_pba_projections();
+
+  // info and next step
+  const int num_total = any_severe_outliers
+                            ? (num_photometric_error_huge +
+                               num_camera_center_distance + num_z_coordinate)
+                            : num_photometric_error_normal;
+  if (num_total > 0) {
+    if (any_severe_outliers) {
+      std::cerr << num_total << " outliers removed (" << num_photometric_error_huge
+                << " for huge photometric error (" << num_photometric_error_normal
+                << " not removed), " << num_camera_center_distance
+                << " too close to camera center, " << num_z_coordinate
+                << " too small z)." << std::endl;
+    } else {
+      std::cerr << num_total << " outliers removed for too large photometric error."
+                << std::endl;
+    }
+  }
+
+}
+
+
+
+
+
+void sample_dso_points() {
+    sample_points(pba_landmarks, calib_cam, cameras, images);
+    compute_pba_projections();
+    //remove_outlier_pba_landmarks();
+}
 
 

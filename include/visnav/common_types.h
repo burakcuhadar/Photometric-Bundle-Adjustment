@@ -174,8 +174,9 @@ struct Camera {
   Sophus::SE3d T_w_c;
 
   /// brightness transfer function parameters
-  double a = 0.0;
-  double b = 0.0;
+  //double a = 0.0;
+  //double b = 0.0;
+  double ab[2] = {0., 0.};
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
