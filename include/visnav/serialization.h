@@ -32,6 +32,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
+
 #include <Eigen/Dense>
 
 #include <cereal/cereal.hpp>
@@ -48,6 +49,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <visnav/calibration.h>
 #include <visnav/common_types.h>
+#include <visnav/pba_types.h>
 
 namespace cereal {
 
@@ -198,6 +200,12 @@ template <class Archive>
 void serialize(Archive& ar, Landmark& lm) {
   ar(CEREAL_NVP(lm.p), CEREAL_NVP(lm.obs), CEREAL_NVP(lm.outlier_obs));
 }
+
+template <class Archive>
+void serialize(Archive& ar, PbaLandmark& lm) {
+  ar(CEREAL_NVP(lm.ref_frame), CEREAL_NVP(lm.p_2d), CEREAL_NVP(lm.inv_depth), CEREAL_NVP(lm.intensity), CEREAL_NVP(lm.obs));
+}
+
 
 template <class Archive>
 void serialize(Archive& ar, FrameCamId& fcid) {

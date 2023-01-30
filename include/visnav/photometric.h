@@ -13,11 +13,15 @@ namespace visnav {
 template <class T>
 class AbstractCamera;
 
+
 const size_t pattern_size = 8;
 const std::vector<std::pair<double, double>> residual_pattern = {{0.,0.},
                                                                  {0.,2.}, {-1.,1.}, {-2.,0.},
                                                                  {-1.,-1.}, {0.,-2.}, {1.,-1.},
                                                                  {2.,0.}};
+
+
+
 /*
 struct PhotometricCostFunctor {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -139,7 +143,7 @@ struct BrightnessTransferRegularizer {
     template <class T>
     bool operator()(T const* const ab, T* residuals) const {
         residuals[0] = ab[0];
-        residuals[1] = ab[1];
+        residuals[1] = T(20.) * ab[1];
         return true;
     }
 };
@@ -165,7 +169,7 @@ struct PhotometricCostFunctor {
                                              const T* const inv_depth) const {
 
         // project p into the target frame(cam2)
-        Eigen::Matrix<T, 3, 1> p_unproj = cam1->unproject(p).stableNormalized();
+        Eigen::Matrix<T, 3, 1> p_unproj = cam1->unproject(p);
         Sophus::SE3<T> T_c2_c1 = T_w_c2.inverse() * T_w_c1;
 
         //Eigen::Matrix<T, 2, 1> p_target = cam2->project(T_w_c2.inverse() * T_w_c1 * (p_unproj / inv_depth[0]));
@@ -200,6 +204,7 @@ struct PhotometricCostFunctor {
         const std::shared_ptr<AbstractCamera<T>> cam2 =
             AbstractCamera<T>::from_data(cam_model, sIntr2);
 
+        std::vector<Eigen::Matrix<T, 2, 1>> target_points;
         for(size_t i=0; i<points.size(); i++) {
             Eigen::Matrix<T, 2, 1> p = points[i].cast<T>();
             Eigen::Matrix<T, 2, 1> p_target = project_to_target(p, cam1, cam2, T_w_c1, T_w_c2, inv_depth);
@@ -209,6 +214,11 @@ struct PhotometricCostFunctor {
                 return true;
             }
 
+            target_points.push_back(p_target);
+        }
+
+        for(size_t i=0; i<target_points.size(); i++) {
+            const auto& p_target = target_points[i];
             T intensity_target;
             interp_target.Evaluate(p_target(1), p_target(0), &intensity_target);
 
@@ -240,7 +250,7 @@ struct PhotometricCostFunctor {
         const std::shared_ptr<AbstractCamera<T>> cam =
             AbstractCamera<T>::from_data(cam_model, sIntr);
 
-
+        std::vector<Eigen::Matrix<T, 2, 1>> target_points;
         for(size_t i=0; i<points.size(); i++) {
             Eigen::Matrix<T, 2, 1> p = points[i].cast<T>();
             Eigen::Matrix<T, 2, 1> p_target = project_to_target(p, cam, cam, T_w_c1, T_w_c2, inv_depth);
@@ -249,6 +259,12 @@ struct PhotometricCostFunctor {
                 residuals = Eigen::Matrix<T, pattern_size, 1>::Zero();
                 return true;
             }
+
+            target_points.push_back(p_target);
+        }
+
+        for(size_t i=0; i<target_points.size(); i++) {
+            const auto& p_target = target_points[i];
 
             T intensity_target;
             interp_target.Evaluate(p_target(1), p_target(0), &intensity_target);
